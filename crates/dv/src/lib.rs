@@ -33,6 +33,20 @@ const ORDER: [[u8; 64]; 2] = [
         6, 10, 18, 24, 34, 40, 50, 54, 12, 16, 26, 32, 42, 48, 56, 62, 14, 28, 30, 44, 46, 58, 60, 64,
     ],
 ];
+// Raster position of each zero-based scan index: the inverse of `ORDER`.
+const SCAN: [[u8; 64]; 2] = {
+    let mut scan = [[0; 64]; 2];
+    let mut mode = 0;
+    while mode < 2 {
+        let mut raster = 0;
+        while raster < 64 {
+            scan[mode][ORDER[mode][raster] as usize - 1] = raster as u8;
+            raster += 1;
+        }
+        mode += 1;
+    }
+    scan
+};
 const AREA: [[usize; 64]; 2] = [
     [
         0, 0, 0, 1, 1, 1, 2, 2, 0, 0, 1, 1, 1, 2, 2, 2, 0, 1, 1, 1, 2, 2, 2, 3, 1, 1, 1, 2, 2, 2, 3, 3, 1, 1, 2, 2, 2, 3, 3, 3, 1, 2, 2, 2, 3, 3, 3, 3, 2, 2,
@@ -133,7 +147,7 @@ impl Block {
             if self.scan >= 64 {
                 return Err(Error("DV coefficient run exceeds block"));
             }
-            let raster = ORDER[self.mode].iter().position(|&n| n as usize == self.scan + 1).ok_or(Error("invalid DV scan"))?;
+            let raster = *SCAN.get(self.mode).and_then(|s| s.get(self.scan)).ok_or(Error("invalid DV scan"))? as usize;
             self.coeff[raster] = t.amp;
         }
         Ok(())
@@ -347,6 +361,14 @@ mod tests {
             let d = vec![0; n];
             assert!(std::panic::catch_unwind(|| decode_frame(&d)).is_ok());
             assert!(decode_frame(&d).is_err());
+        }
+    }
+    #[test]
+    fn scan_inverts_order() {
+        for mode in 0..2 {
+            for raster in 0..64 {
+                assert_eq!(SCAN[mode][ORDER[mode][raster] as usize - 1] as usize, raster);
+            }
         }
     }
     #[test]
