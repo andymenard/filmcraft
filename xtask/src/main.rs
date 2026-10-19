@@ -409,6 +409,7 @@ const FIXTURE_GENERATORS: &[(&str, &str)] = &[
     ("matroska", "oracle"),
     ("prores", "oracle_decode"),
     ("dnx", "oracle_decode"),
+    ("dv", "oracle"),
     ("codecs", "mxf_oracle"),
     ("codecs", "mpeg_oracle"),
     ("mpeg2v", "oracle"),

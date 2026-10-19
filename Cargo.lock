@@ -1889,6 +1889,9 @@ dependencies = [
 [[package]]
 name = "filmcraft-dv"
 version = "0.8.0"
+dependencies = [
+ "filmcraft-testkit",
+]
 
 [[package]]
 name = "filmcraft-edit"
