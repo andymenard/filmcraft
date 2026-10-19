@@ -444,6 +444,7 @@ const FIXTURE_GENERATORS: &[(&str, &str, &str)] = &[
     ("matroska", "oracle", "generate_fixtures"),
     ("prores", "it", "oracle_decode::generate_fixtures"),
     ("dnx", "it", "oracle_decode::generate_fixtures"),
+    ("dv", "oracle", "generate_fixtures"),
     ("codecs", "it", "mxf_oracle::generate_fixtures"),
     ("codecs", "it", "mpeg_oracle::generate_fixtures"),
     ("mpeg2v", "it", "oracle::generate_fixtures"),

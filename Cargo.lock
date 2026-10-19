@@ -2048,6 +2048,9 @@ dependencies = [
 [[package]]
 name = "filmcraft-dv"
 version = "0.13.0"
+dependencies = [
+ "filmcraft-testkit",
+]
 
 [[package]]
 name = "filmcraft-edit"
