@@ -425,31 +425,65 @@ mod tests {
             })
             .collect()
     }
+    /// The five video DIF blocks of one segment.
+    fn segment_difs(data: &[u8], sequence: usize, segment: usize) -> [&[u8]; 5] {
+        std::array::from_fn(|mb| &data[video_dif(sequence, segment, mb)..video_dif(sequence, segment, mb) + 80])
+    }
+    /// Overwrite a DCT block's AC bits (everything after its 12-bit header) with `bit(i)`.
+    fn set_ac_bits(data: &mut [u8], block: usize, len: usize, bit: impl Fn(usize) -> u8) {
+        for p in 12..len * 8 {
+            let mask = 0x80 >> (p % 8);
+            let byte = &mut data[block + p / 8];
+            *byte = if bit(p - 12) & 1 == 1 { *byte | mask } else { *byte & !mask };
+        }
+    }
     #[test]
-    fn damaged_segments_are_concealed() {
+    fn every_bit_pattern_is_a_code_word() {
+        // With its escapes the VLC table is complete, so damaged AC data shows up as an overlong
+        // run or a missing end of block, never as an invalid word; `Block::decode`'s
+        // "invalid DV VLC" check only guards the table.
+        assert!(tokens().iter().all(|t| t.len > 0));
+    }
+    #[test]
+    fn each_kind_of_damage_conceals_only_its_segment() {
         let clean = decode_frame(&flat_frame()).unwrap();
         assert_eq!(clean.concealed, 0);
         let mut data = flat_frame();
-        // Sequence 2, segment 5: one macroblock's status says its data is damaged.
+        // Sequence 2, segment 5: one macroblock's STA and QNO are both 0xF (damaged).
         data[video_dif(2, 5, 3) + 3] = 0xff;
-        // Sequence 7, segment 20: a 13-bit run-63 escape overruns the first Y block.
-        let block = video_dif(7, 20, 0) + 4;
-        data[block + 1] = 0b1111;
-        data[block + 2] = 0b1101_1111;
-        data[block + 3] = 0b1000_0000;
-        let f = decode_frame(&data).unwrap();
-        assert_eq!(f.concealed, 2);
-        let damaged: std::collections::HashSet<usize> = segment_luma(2, 5).into_iter().chain(segment_luma(7, 20)).collect();
-        for (i, (&got, &want)) in f.y.iter().zip(&clean.y).enumerate() {
-            assert_eq!(got, if damaged.contains(&i) { 16 } else { want }, "luma {i}");
-        }
-        assert_ne!(clean.y[segment_luma(2, 5)[0]], 16);
-        let damaged: std::collections::HashSet<usize> = segment_chroma(2, 5).into_iter().chain(segment_chroma(7, 20)).collect();
-        for (plane, got, want) in [("cb", &f.cb, &clean.cb), ("cr", &f.cr, &clean.cr)] {
-            for (i, (&got, &want)) in got.iter().zip(want).enumerate() {
-                assert_eq!(got, if damaged.contains(&i) { 128 } else { want }, "{plane} {i}");
+        // Sequence 7, segment 20: a 13-bit run-63 escape (1111110 111111) overruns the first Y block.
+        set_ac_bits(&mut data, video_dif(7, 20, 0) + 4, 14, |i| u8::from(i < 13 && i != 6));
+        // Sequence 9, segment 26 (on the clipped right edge): every block is filled with the shortest
+        // run-0 code word, so the segment's bits run out with no end of block anywhere.
+        let (code, len) = (0..65536)
+            .map(|c| (c, tokens()[c]))
+            .filter(|(_, t)| !t.eob && t.len > 0 && t.run == 0)
+            .map(|(c, t)| (c >> (16 - t.len), t.len))
+            .min_by_key(|&(_, l)| l)
+            .unwrap();
+        for mb in 0..5 {
+            for (b, offset) in [4, 18, 32, 46, 60, 70].into_iter().enumerate() {
+                set_ac_bits(&mut data, video_dif(9, 26, mb) + offset, if b < 4 { 14 } else { 10 }, |i| (code >> (len - 1 - i % len)) as u8);
             }
         }
+        let cases = [(2, 5, "damaged DV macroblock"), (7, 20, "DV coefficient run exceeds block"), (9, 26, "DV AC data lacks end of block")];
+        for (sequence, segment, why) in cases {
+            assert_eq!(segment_blocks(&segment_difs(&data, sequence, segment)).err(), Some(Error(why)), "segment {sequence}/{segment}");
+        }
+        let f = decode_frame(&data).unwrap();
+        assert_eq!(f.concealed, cases.len());
+        let luma: std::collections::HashSet<usize> = cases.iter().flat_map(|&(s, k, _)| segment_luma(s, k)).collect();
+        for (i, (&got, &want)) in f.y.iter().zip(&clean.y).enumerate() {
+            assert_eq!(got, if luma.contains(&i) { 16 } else { want }, "luma {i}");
+        }
+        let chroma: std::collections::HashSet<usize> = cases.iter().flat_map(|&(s, k, _)| segment_chroma(s, k)).collect();
+        for (plane, got, want) in [("cb", &f.cb, &clean.cb), ("cr", &f.cr, &clean.cr)] {
+            for (i, (&got, &want)) in got.iter().zip(want).enumerate() {
+                assert_eq!(got, if chroma.contains(&i) { 128 } else { want }, "{plane} {i}");
+            }
+        }
+        // The concealed values differ from what the clean frame has there.
+        assert_ne!(clean.y[segment_luma(2, 5)[0]], 16);
         assert_ne!(clean.cb[segment_chroma(2, 5)[0]], 128);
     }
     #[test]

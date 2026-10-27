@@ -187,3 +187,29 @@ fn mutated_and_truncated_frames_never_panic() {
         }
     }
 }
+
+#[test]
+fn payload_bit_flips_conceal_at_most_one_segment() {
+    let Some(ff) = ffmpeg() else { return };
+    for spec in specs() {
+        let input = std::fs::read(make(&ff, &spec)).unwrap();
+        let frame = &input[..PACKET];
+        // Offsets of the video DIF blocks; everything after a block's 3-byte ID (STA/QNO, DCT
+        // headers and AC bits) is coded data that only its own segment depends on.
+        let video: Vec<usize> = (0..PACKET / 80).map(|i| i * 80).filter(|&o| frame[o] >> 5 == 4).collect();
+        assert_eq!(video.len(), 1350, "{}", spec.name);
+        let mut state = 0x51ed270bu32;
+        let mut concealed = 0;
+        for _ in 0..96 {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            let mut corrupted = frame.to_vec();
+            let pos = video[state as usize % video.len()] + 3 + (state >> 11) as usize % 77;
+            corrupted[pos] ^= 1 << (state % 8);
+            let decoded = decode_frame(&corrupted);
+            assert!(decoded.as_ref().is_ok_and(|f| f.concealed <= 1), "{}: flip at byte {pos}", spec.name);
+            concealed += decoded.map_or(0, |f| f.concealed);
+        }
+        // Not every flip breaks the bitstream (a changed coefficient is still valid), but some must.
+        assert!(concealed > 0, "{}: no flip exercised concealment", spec.name);
+    }
+}
