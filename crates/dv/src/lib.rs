@@ -20,6 +20,9 @@ pub struct Frame {
     pub y: Vec<u8>,
     pub cb: Vec<u8>,
     pub cr: Vec<u8>,
+    /// Video segments (five macroblocks each, 270 per frame) whose coded data was damaged. Their
+    /// pixels keep the initial black luma and neutral chroma.
+    pub concealed: usize,
 }
 
 // Figure 27: one-based coefficient output order, expressed at raster positions.
@@ -282,7 +285,50 @@ fn put(plane: &mut [u8], stride: usize, x: usize, y: usize, data: &[u8; 64], rig
     Ok(())
 }
 
-/// Decode one complete DV25 525/60 DIF frame. All bit pools and dimensions are bounded.
+/// The 30 decoded DCT blocks of one video segment (five macroblocks' DIF blocks, in order).
+fn segment_blocks(difs: &[&[u8]; 5]) -> Result<Vec<Block>> {
+    let mut blocks = Vec::with_capacity(30);
+    for d in difs {
+        if d[3] & 0xf == 15 && d[3] >> 4 == 15 {
+            return Err(Error("damaged DV macroblock"));
+        }
+        let mut offset = 4;
+        for b in 0..6 {
+            let n = if b < 4 { 14 } else { 10 };
+            let mut block = Block::new(&d[offset..offset + n], (d[3] & 15) as usize)?;
+            block.decode()?;
+            blocks.push(block);
+            offset += n;
+        }
+    }
+    let mut video_pool = Vec::new();
+    for mb in 0..5 {
+        let chunk = &mut blocks[mb * 6..mb * 6 + 6];
+        let mut pool = Vec::new();
+        for b in chunk.iter() {
+            if b.done {
+                pool.extend_from_slice(&b.bits[b.cursor..]);
+            }
+        }
+        let mut cursor = 0;
+        for b in chunk.iter_mut() {
+            b.continue_from(&pool, &mut cursor)?;
+        }
+        video_pool.extend_from_slice(&pool[cursor..]);
+    }
+    let mut cursor = 0;
+    for b in &mut blocks {
+        b.continue_from(&video_pool, &mut cursor)?;
+        if !b.done {
+            return Err(Error("DV AC data lacks end of block"));
+        }
+    }
+    Ok(blocks)
+}
+
+/// Decode one complete DV25 525/60 DIF frame. All bit pools and dimensions are bounded. A frame
+/// with the wrong size, header or DIF IDs is an error; damaged coded data conceals only its
+/// segment (see [`Frame::concealed`]).
 pub fn decode_frame(data: &[u8]) -> Result<Frame> {
     if data.len() != 120000 {
         return Err(Error("unsupported DV frame size (requires 525/60 DV25)"));
@@ -290,51 +336,25 @@ pub fn decode_frame(data: &[u8]) -> Result<Frame> {
     if data[0] >> 5 != 0 || data[3] & 0x80 != 0 {
         return Err(Error("invalid or unsupported DV DIF header"));
     }
-    let mut frame = Frame { y: vec![16; 720 * 480], cb: vec![128; 180 * 480], cr: vec![128; 180 * 480] };
+    let mut frame = Frame { y: vec![16; 720 * 480], cb: vec![128; 180 * 480], cr: vec![128; 180 * 480], concealed: 0 };
     for sequence in 0..10 {
         for segment in 0..27 {
-            let mut blocks = Vec::with_capacity(30);
-            for mb in 0..5 {
+            let mut difs: [&[u8]; 5] = [&[]; 5];
+            for (mb, slot) in difs.iter_mut().enumerate() {
                 let video = segment * 5 + mb;
                 let dif = sequence * 150 + 7 + video + video / 15;
                 let d = data.get(dif * 80..dif * 80 + 80).ok_or(Error("truncated DV DIF block"))?;
                 if d[0] >> 5 != 4 || d[1] >> 4 != sequence as u8 || d[2] as usize != video {
                     return Err(Error("invalid DV video DIF ID"));
                 }
-                if d[3] & 0xf == 15 && d[3] >> 4 == 15 {
-                    return Err(Error("damaged DV macroblock"));
-                }
-                let mut offset = 4;
-                for b in 0..6 {
-                    let n = if b < 4 { 14 } else { 10 };
-                    let mut block = Block::new(&d[offset..offset + n], (d[3] & 15) as usize)?;
-                    block.decode()?;
-                    blocks.push(block);
-                    offset += n;
-                }
+                *slot = d;
             }
-            let mut video_pool = Vec::new();
-            for mb in 0..5 {
-                let chunk = &mut blocks[mb * 6..mb * 6 + 6];
-                let mut pool = Vec::new();
-                for b in chunk.iter() {
-                    if b.done {
-                        pool.extend_from_slice(&b.bits[b.cursor..]);
-                    }
-                }
-                let mut cursor = 0;
-                for b in chunk.iter_mut() {
-                    b.continue_from(&pool, &mut cursor)?;
-                }
-                video_pool.extend_from_slice(&pool[cursor..]);
-            }
-            let mut cursor = 0;
-            for b in &mut blocks {
-                b.continue_from(&video_pool, &mut cursor)?;
-                if !b.done {
-                    return Err(Error("DV AC data lacks end of block"));
-                }
-            }
+            // Damage inside a segment's coded data stays in that segment: its blocks share the
+            // segment's overflow bits, so the whole segment is concealed and decoding continues.
+            let Ok(blocks) = segment_blocks(&difs) else {
+                frame.concealed += 1;
+                continue;
+            };
             for mb in 0..5 {
                 let (x, y) = location(sequence, segment, mb);
                 for b in 0..6 {
@@ -362,6 +382,64 @@ mod tests {
             assert!(std::panic::catch_unwind(|| decode_frame(&d)).is_ok());
             assert!(decode_frame(&d).is_err());
         }
+    }
+    /// A valid 525/60 frame whose every DCT block is a DC value followed by end of block.
+    fn flat_frame() -> Vec<u8> {
+        let mut data = vec![0; 120000];
+        for sequence in 0..10 {
+            for video in 0..135 {
+                let dif = (sequence * 150 + 7 + video + video / 15) * 80;
+                data[dif] = 4 << 5;
+                data[dif + 1] = (sequence as u8) << 4;
+                data[dif + 2] = video as u8;
+                for offset in [4, 18, 32, 46, 60, 70] {
+                    // DC 64, 8x8 DCT, class 0, then the 4-bit end-of-block code 0110.
+                    data[dif + offset] = 64 >> 1;
+                    data[dif + offset + 1] = 0b0110;
+                }
+            }
+        }
+        data
+    }
+    fn video_dif(sequence: usize, segment: usize, mb: usize) -> usize {
+        let video = segment * 5 + mb;
+        (sequence * 150 + 7 + video + video / 15) * 80
+    }
+    /// Luma pixels of one segment's five macroblocks.
+    fn segment_luma(sequence: usize, segment: usize) -> Vec<usize> {
+        (0..5)
+            .flat_map(|mb| {
+                let (x, y) = location(sequence, segment, mb);
+                let (w, h) = if x == 704 { (16, 16) } else { (32, 8) };
+                (0..h).flat_map(move |dy| (0..w).map(move |dx| (y + dy) * 720 + x + dx))
+            })
+            .collect()
+    }
+    #[test]
+    fn damaged_segments_are_concealed() {
+        let clean = decode_frame(&flat_frame()).unwrap();
+        assert_eq!(clean.concealed, 0);
+        let mut data = flat_frame();
+        // Sequence 2, segment 5: one macroblock's status says its data is damaged.
+        data[video_dif(2, 5, 3) + 3] = 0xff;
+        // Sequence 7, segment 20: a 13-bit run-63 escape overruns the first Y block.
+        let block = video_dif(7, 20, 0) + 4;
+        data[block + 1] = 0b1111;
+        data[block + 2] = 0b1101_1111;
+        data[block + 3] = 0b1000_0000;
+        let f = decode_frame(&data).unwrap();
+        assert_eq!(f.concealed, 2);
+        let damaged: std::collections::HashSet<usize> = segment_luma(2, 5).into_iter().chain(segment_luma(7, 20)).collect();
+        for (i, (&got, &want)) in f.y.iter().zip(&clean.y).enumerate() {
+            assert_eq!(got, if damaged.contains(&i) { 16 } else { want }, "luma {i}");
+        }
+        assert_ne!(clean.y[segment_luma(2, 5)[0]], 16);
+    }
+    #[test]
+    fn bad_dif_ids_still_fail_the_frame() {
+        let mut data = flat_frame();
+        data[video_dif(4, 9, 2) + 2] ^= 1;
+        assert!(decode_frame(&data).is_err());
     }
     #[test]
     fn scan_inverts_order() {

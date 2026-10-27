@@ -20,8 +20,11 @@ timecode, audio and seeking. No external decoder, transcoded file, or FFmpeg run
 dependency is used. PCM audio uses FilmCraft's existing native decoder.
 
 Currently scoped to NTSC DV25/DVCPRO25 MOV. PAL DV, DV50/DVCPRO50, DVCPRO HD,
-raw DV audio demultiplexing and AVI DV are not implemented. Unsupported or damaged
-packets return a decoding error without changing the input or crashing.
+raw DV audio demultiplexing and AVI DV are not implemented. Unsupported packets and
+frames with a wrong size, header or DIF IDs return a decoding error without changing the
+input or crashing. Damaged coded data (a macroblock flagged as damaged, an invalid VLC,
+an overlong coefficient run or a missing end of block) conceals only its video segment,
+which keeps black luma and neutral chroma, and the rest of the frame is decoded.
 
 `cargo test -p filmcraft-dv` covers spatial coverage, malformed inputs, generated
 progressive/interlaced patterns versus an external FFmpeg oracle (maximum sample
