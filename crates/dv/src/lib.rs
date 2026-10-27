@@ -415,6 +415,16 @@ mod tests {
             })
             .collect()
     }
+    /// Chroma samples (in the 180-wide planes) of one segment's five macroblocks.
+    fn segment_chroma(sequence: usize, segment: usize) -> Vec<usize> {
+        (0..5)
+            .flat_map(|mb| {
+                let (x, y) = location(sequence, segment, mb);
+                let (w, h) = if x == 704 { (4, 16) } else { (8, 8) };
+                (0..h).flat_map(move |dy| (0..w).map(move |dx| (y + dy) * 180 + x / 4 + dx))
+            })
+            .collect()
+    }
     #[test]
     fn damaged_segments_are_concealed() {
         let clean = decode_frame(&flat_frame()).unwrap();
@@ -434,6 +444,13 @@ mod tests {
             assert_eq!(got, if damaged.contains(&i) { 16 } else { want }, "luma {i}");
         }
         assert_ne!(clean.y[segment_luma(2, 5)[0]], 16);
+        let damaged: std::collections::HashSet<usize> = segment_chroma(2, 5).into_iter().chain(segment_chroma(7, 20)).collect();
+        for (plane, got, want) in [("cb", &f.cb, &clean.cb), ("cr", &f.cr, &clean.cr)] {
+            for (i, (&got, &want)) in got.iter().zip(want).enumerate() {
+                assert_eq!(got, if damaged.contains(&i) { 128 } else { want }, "{plane} {i}");
+            }
+        }
+        assert_ne!(clean.cb[segment_chroma(2, 5)[0]], 128);
     }
     #[test]
     fn bad_dif_ids_still_fail_the_frame() {
